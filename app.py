@@ -269,7 +269,11 @@ a{color:inherit;text-decoration:none}
 </div>
 {% block body %}{% endblock %}
 <script>
-var DEEN_VERSION = 4;
+var DEEN_VERSION = 5;
+function statPing(o){ try { if (navigator.onLine) navigator.sendBeacon('/stats/ping', new Blob([JSON.stringify(o)], {type:'application/json'})); } catch(e){} }
+statPing({p: location.pathname + location.search});
+window.addEventListener('appinstalled', function(){ statPing({ev:'install'}); });
+try { if (window.matchMedia('(display-mode: standalone)').matches && !localStorage.getItem('deen_installed')) { localStorage.setItem('deen_installed','1'); statPing({ev:'install'}); } } catch(e){}
 async function doUpdate(btn){
   if (btn) { btn.disabled = true; btn.textContent = "⏳ بيحدّث..."; }
   try {
@@ -337,7 +341,7 @@ HOME = """{% extends "base" %}
   </div>
   <div style="text-align:center;margin-top:20px">
     <button class="pbtn" onclick="updateApp(this)">🔄 تحديث التطبيق</button>
-    <div class="aud-note" id="updNote" style="text-align:center">النسخة 4 — التحديثات بتيجي لوحدها، والزرار ده لو حابب تتأكد. الأذان والتلاوات المحمّلة بتفضل محفوظة بعد التحديث.</div>
+    <div class="aud-note" id="updNote" style="text-align:center">النسخة 5 — التحديثات بتيجي لوحدها، والزرار ده لو حابب تتأكد. الأذان والتلاوات المحمّلة بتفضل محفوظة بعد التحديث.</div>
   </div>
   {{ foot }}
 </div>
@@ -587,6 +591,7 @@ async function audAct(){
     var blob = new Blob(chunks, {type: "audio/mpeg"});
     var c2 = await caches.open(AUD_CACHE);
     await c2.put(AUD_KEY, new Response(blob, {headers: {"Content-Type": "audio/mpeg"}}));
+    statPing({ev:'surah'});
     var idx2 = audIdx(); idx2[SURAH_N] = blob.size; audIdxSave(idx2);
     audSize = blob.size; audState = "downloaded";
     document.getElementById("aud").src = AUD_KEY;
@@ -1258,6 +1263,7 @@ async function adhDownload(){
     var blob = new Blob(chunks, {type: "audio/mpeg"});
     var c = await caches.open("deen-audio-v1");
     await c.put(adhKey(v), new Response(blob, {headers: {"Content-Type": "audio/mpeg"}}));
+    statPing({ev:'adhan'});
   } catch(e) {
     st.textContent = "التحميل ما تمش — تأكد من الإنترنت وحاول تاني";
   }
@@ -1926,7 +1932,7 @@ MANIFEST = {
 }
 
 SW_JS = """
-const CACHE = 'deen-v4';
+const CACHE = 'deen-v5';
 const AUDIO_CACHE = 'deen-audio-v1';
 const SHELL = ['/', '/quran', '/adhkar', '/adhkar?t=morning', '/adhkar?t=evening', '/duas', '/hadith', '/prayer', '/tasbih', '/manifest.json', '/icon.svg', '/icon-192.png', '/icon-512.png'];
 self.addEventListener('install', e => {
@@ -2068,7 +2074,109 @@ ICON_SVG = """<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
 <text x="256" y="445" font-size="52" text-anchor="middle" fill="#e8c987" font-family="serif">ديني</text>
 </svg>"""
 
-APP_VERSION = 4
+APP_VERSION = 5
+
+# ---------- stats (counts only, no personal data, no IPs) ----------
+STATS_FILE = os.environ.get("DEENI_STATS_FILE", os.path.join(_HERE, "deeni_stats.json"))
+_stats_lock = threading.Lock()
+
+def _load_stats():
+    try:
+        with open(STATS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {"views": {}, "events": {}, "days": {}, "started": time.strftime("%Y-%m-%d")}
+
+def _save_stats(s):
+    tmp = STATS_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(s, f, ensure_ascii=False)
+    os.replace(tmp, STATS_FILE)
+
+def stats_bump(kind, key):
+    with _stats_lock:
+        s = _load_stats()
+        bucket = s.setdefault(kind, {})
+        bucket[key] = int(bucket.get(key, 0)) + 1
+        if kind == "views":
+            day = time.strftime("%Y-%m-%d")
+            d = s.setdefault("days", {})
+            d[day] = int(d.get(day, 0)) + 1
+            # keep last 30 days only
+            for k in sorted(d.keys())[:-30]:
+                del d[k]
+        _save_stats(s)
+
+_SECTION_NAMES = {
+    "/": "الرئيسية", "/quran": "القرآن (الفهرس)", "/quran/سورة": "صفحات السور",
+    "/adhkar": "الأذكار", "/adhkar?t=evening": "أذكار المساء", "/duas": "الأدعية",
+    "/hadith": "الحديث (الفهرس)", "/hadith/كتاب": "كتب الحديث", "/prayer": "مواقيت الصلاة", "/tasbih": "السبحة",
+}
+_EVENT_NAMES = {"adhan": "تحميلات الأذان", "surah": "تحميلات تلاوة السور", "install": "تثبيت على الشاشة الرئيسية (تقريبي)"}
+
+@app.route("/stats/ping", methods=["POST"])
+def stats_ping():
+    data = request.get_json(force=True, silent=True) or {}
+    ev = str(data.get("ev") or "")
+    if ev in _EVENT_NAMES:
+        stats_bump("events", ev)
+    else:
+        p = str(data.get("p") or "")
+        if p.startswith("/quran/"):
+            p = "/quran/سورة"
+        elif p.startswith("/hadith/") and not p.startswith("/hadith-data"):
+            p = "/hadith/كتاب"
+        elif p.startswith("/adhkar?t=evening"):
+            p = "/adhkar?t=evening"
+        elif p.startswith("/adhkar"):
+            p = "/adhkar"
+        if p in _SECTION_NAMES:
+            stats_bump("views", p)
+    return ("", 204)
+
+@app.route("/stats")
+def stats_page():
+    token = os.environ.get("DEENI_STATS_TOKEN", "")
+    if not token:
+        return ("""<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>إحصائيات ديني</title></head><body style="background:#0d1b12;color:#e8e0cf;font-family:sans-serif;padding:40px;text-align:center">
+<h2>🔒 الإحصائيات محتاجة كلمة سر</h2>
+<p>عشان تشغّل صفحة الإحصائيات: في Railway افتح Variables وضيف متغير اسمه <b dir="ltr">DEENI_STATS_TOKEN</b> وحط فيه أي كلمة سر تختارها، وبعدها افتح<br><b dir="ltr">/stats?key=كلمة-السر</b></p>
+</body></html>""", 503)
+    if request.args.get("key", "") != token:
+        return ("ممنوع — كلمة السر غلط", 403)
+    s = _load_stats()
+    try:
+        nsubs = len(_load_subs())
+    except Exception:
+        nsubs = 0
+    views = s.get("views", {})
+    events = s.get("events", {})
+    days = s.get("days", {})
+    total_views = sum(int(v) for v in views.values())
+    rows = "".join("<tr><td>%s</td><td>%d</td></tr>" % (_SECTION_NAMES.get(k, k), int(v))
+                   for k, v in sorted(views.items(), key=lambda kv: -int(kv[1])))
+    erows = "".join("<tr><td>%s</td><td>%d</td></tr>" % (_EVENT_NAMES.get(k, k), int(v))
+                    for k, v in sorted(events.items(), key=lambda kv: -int(kv[1])))
+    drows = "".join("<tr><td dir='ltr'>%s</td><td>%d</td></tr>" % (k, int(days[k]))
+                    for k in sorted(days.keys(), reverse=True)[:14])
+    html = """<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="60"><title>إحصائيات ديني</title>
+<style>body{background:#0d1b12;color:#e8e0cf;font-family:sans-serif;padding:24px;max-width:560px;margin:auto}
+h1{color:#d4af6a;font-size:22px}h2{color:#d4af6a;font-size:17px;margin-top:28px}
+table{width:100%%;border-collapse:collapse}td{padding:8px;border-bottom:1px solid #234a34;font-size:15px}
+td:last-child{text-align:left;color:#d4af6a;font-weight:bold}.big{font-size:34px;color:#d4af6a;font-weight:bold}
+.card{background:#142b1e;border:1px solid #234a34;border-radius:12px;padding:16px;margin:10px 0}
+.note{color:#8fa89a;font-size:12px;margin-top:24px;line-height:1.8}</style></head><body>
+<h1>📊 إحصائيات ديني</h1>
+<div class="card"><div>إجمالي الزيارات (أونلاين)</div><div class="big">%d</div></div>
+<div class="card"><div>مشتركين تنبيهات الأذان</div><div class="big">%d</div></div>
+<h2>الزيارات حسب القسم</h2><table>%s</table>
+<h2>الأحداث</h2><table>%s<tr><td>مشتركين التنبيهات</td><td>%d</td></tr></table>
+<h2>زيارات آخر ١٤ يوم</h2><table>%s</table>
+<div class="note">الأرقام دي عدّادات بس — مفيش أي بيانات شخصية أو عناوين IP بتتخزن. الزيارات بتتسجل لما المستخدم يكون متصل بالنت؛ اللي بيستخدم التطبيق أوفلاين بس مش بيظهر هنا. رقم "التثبيت على الشاشة الرئيسية" تقريبي (بيتحسب أول مرة التطبيق يتفتح من الأيقونة). الأرقام بتتراجع للصفر لو Railway عمل إعادة نشر، إلا لو ضفت Volume (شوف الخطوات).</div>
+</body></html>""" % (total_views, nsubs, rows, erows, nsubs, drows)
+    return html
 
 @app.route("/version.json")
 def version():
