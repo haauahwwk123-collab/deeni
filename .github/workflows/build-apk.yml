@@ -1,0 +1,404 @@
+name: Build APK
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/build-apk.yml'
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Restore signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: deeni-signing-key-v1
+      - name: Create Capacitor project
+        run: |
+          mkdir -p /tmp/work && cd /tmp/work
+          npm init -y
+          npm i @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6
+          mkdir www
+          echo '<html><body>Deeni</body></html>' > www/index.html
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.hassan.deeni",
+            "appName": "ديني",
+            "webDir": "www",
+            "server": {
+              "url": "https://deeni-production.up.railway.app",
+              "cleartext": false
+            }
+          }
+          EOF
+          npx cap add android
+      - name: Add adhan audio
+        run: |
+          cd /tmp/work/android/app/src/main
+          mkdir -p res/raw
+          curl -fL -o res/raw/adhan.mp3 https://deeni-production.up.railway.app/adhan-src/fakhry.mp3
+          SIZE=$(stat -c %s res/raw/adhan.mp3)
+          echo "adhan size: $SIZE"
+          test "$SIZE" -gt 500000
+      - name: Write native code
+        run: |
+          D=/tmp/work/android/app/src/main/java/com/hassan/deeni
+          mkdir -p $D
+          cat > $D/AdhanScheduler.java <<'EOF'
+          package com.hassan.deeni;
+
+          import android.app.AlarmManager;
+          import android.app.PendingIntent;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import java.util.Calendar;
+          import java.util.TimeZone;
+
+          public class AdhanScheduler {
+              static final String[] KEYS = {"Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"};
+              static final String[] AR = {"الفجر", "الظهر", "العصر", "المغرب", "العشاء"};
+              static final int DAYS = 7;
+
+              public static void save(Context c, double lat, double lng, String prayersJson) {
+                  SharedPreferences.Editor e = c.getSharedPreferences("adhan", 0).edit();
+                  e.putFloat("lat", (float) lat).putFloat("lng", (float) lng);
+                  if (prayersJson != null) e.putString("pr", prayersJson);
+                  e.apply();
+              }
+
+              static double dsin(double x) { return Math.sin(Math.toRadians(x)); }
+              static double dcos(double x) { return Math.cos(Math.toRadians(x)); }
+              static double dtan(double x) { return Math.tan(Math.toRadians(x)); }
+              static double fh(double x) { x = x % 24; return x < 0 ? x + 24 : x; }
+              static double jd(int y, int m, int d) {
+                  if (m <= 2) { y--; m += 12; }
+                  int A = (int) Math.floor(y / 100.0);
+                  int B = 2 - A + (int) Math.floor(A / 4.0);
+                  return Math.floor(365.25 * (y + 4716)) + Math.floor(30.6001 * (m + 1)) + d + B - 1524.5;
+              }
+              static double[] sun(double j) {
+                  double dd = j - 2451545.0, g = 357.529 + 0.98560028 * dd, q = 280.459 + 0.98564736 * dd;
+                  double L = q + 1.915 * dsin(g) + 0.020 * dsin(2 * g), e = 23.439 - 0.00000036 * dd;
+                  double RA = Math.toDegrees(Math.atan2(dcos(e) * dsin(L), dcos(L))) / 15;
+                  RA = ((RA % 24) + 24) % 24;
+                  double decl = Math.toDegrees(Math.asin(dsin(e) * dsin(L)));
+                  double eqt = q / 15 - RA;
+                  eqt = ((eqt % 24) + 24) % 24;
+                  if (eqt > 12) eqt -= 24;
+                  return new double[]{decl, eqt};
+              }
+              // Same Egyptian-method calculation the Deeni page uses. Returns Fajr, Dhuhr, Asr, Maghrib, Isha in local hours.
+              static double[] compute(final double lat, double lng, double tz, int y, int m, int d) {
+                  final double J = jd(y, m, d) - lng / (15 * 24);
+                  class H {
+                      double mid(double t) { return fh(12 - sun(J + t)[1]); }
+                      double ha(double a, double t) {
+                          double[] s = sun(J + t);
+                          double c = (-dsin(a) - dsin(s[0]) * dsin(lat)) / (dcos(s[0]) * dcos(lat));
+                          c = Math.max(-1, Math.min(1, c));
+                          return Math.toDegrees(Math.acos(c)) / 15;
+                      }
+                      double aha(double t) {
+                          double[] s = sun(J + t);
+                          double a = Math.toDegrees(Math.atan(1 / (1 + dtan(Math.abs(lat - s[0])))));
+                          double c = (dsin(a) - dsin(s[0]) * dsin(lat)) / (dcos(s[0]) * dcos(lat));
+                          c = Math.max(-1, Math.min(1, c));
+                          return Math.toDegrees(Math.acos(c)) / 15;
+                      }
+                  }
+                  H h = new H();
+                  double off = tz - lng / 15;
+                  return new double[]{
+                      fh(h.mid(5 / 24.0) - h.ha(19.5, 5 / 24.0) + off),
+                      fh(h.mid(12 / 24.0) + off),
+                      fh(h.mid(15 / 24.0) + h.aha(15 / 24.0) + off),
+                      fh(h.mid(18 / 24.0) + h.ha(0.833, 18 / 24.0) + off),
+                      fh(h.mid(19 / 24.0) + h.ha(17.5, 19 / 24.0) + off)};
+              }
+
+              static PendingIntent pi(Context c, int code, String name, boolean create) {
+                  Intent i = new Intent(c, AdhanReceiver.class).setAction("deeni.adhan." + code).putExtra("name", name);
+                  int flags = PendingIntent.FLAG_IMMUTABLE | (create ? PendingIntent.FLAG_UPDATE_CURRENT : PendingIntent.FLAG_NO_CREATE);
+                  return PendingIntent.getBroadcast(c, code, i, flags);
+              }
+
+              static void setAt(Context c, AlarmManager am, long t, int code, String name) {
+                  PendingIntent show = PendingIntent.getActivity(c, 0, new Intent(c, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
+                  am.setAlarmClock(new AlarmManager.AlarmClockInfo(t, show), pi(c, code, name, true));
+              }
+
+              public static void scheduleTest(Context c) {
+                  AlarmManager am = (AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
+                  setAt(c, am, System.currentTimeMillis() + 120000, 999, "اختبار الأذان");
+              }
+
+              public static void scheduleAll(Context c) {
+                  SharedPreferences p = c.getSharedPreferences("adhan", 0);
+                  double lat = p.getFloat("lat", 30.0444f), lng = p.getFloat("lng", 31.2357f);
+                  boolean[] en = {true, true, true, true, true};
+                  String pr = p.getString("pr", null);
+                  if (pr != null) {
+                      try {
+                          org.json.JSONObject o = new org.json.JSONObject(pr);
+                          for (int i = 0; i < 5; i++) if (o.has(KEYS[i])) en[i] = o.optBoolean(KEYS[i], true);
+                      } catch (Exception ignored) {}
+                  }
+                  AlarmManager am = (AlarmManager) c.getSystemService(Context.ALARM_SERVICE);
+                  for (int day = 0; day < DAYS; day++) for (int i = 0; i < 5; i++) {
+                      PendingIntent old = pi(c, day * 10 + i, "", false);
+                      if (old != null) am.cancel(old);
+                  }
+                  long now = System.currentTimeMillis();
+                  for (int day = 0; day < DAYS; day++) {
+                      Calendar cal = Calendar.getInstance();
+                      cal.add(Calendar.DAY_OF_YEAR, day);
+                      int y = cal.get(Calendar.YEAR), m = cal.get(Calendar.MONTH) + 1, d = cal.get(Calendar.DAY_OF_MONTH);
+                      double tz = TimeZone.getDefault().getOffset(cal.getTimeInMillis()) / 3600000.0;
+                      double[] t = compute(lat, lng, tz, y, m, d);
+                      for (int i = 0; i < 5; i++) {
+                          if (!en[i]) continue;
+                          int H = (int) t[i];
+                          int M = (int) Math.round((t[i] - H) * 60);
+                          Calendar f = Calendar.getInstance();
+                          f.set(y, m - 1, d, H, 0, 0);
+                          f.set(Calendar.MILLISECOND, 0);
+                          f.add(Calendar.MINUTE, M);
+                          if (f.getTimeInMillis() > now + 5000) setAt(c, am, f.getTimeInMillis(), day * 10 + i, AR[i]);
+                      }
+                  }
+              }
+          }
+          EOF
+          cat > $D/AdhanReceiver.java <<'EOF'
+          package com.hassan.deeni;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+          import androidx.core.content.ContextCompat;
+
+          public class AdhanReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context c, Intent i) {
+                  try { AdhanScheduler.scheduleAll(c); } catch (Exception ignored) {}
+                  Intent s = new Intent(c, AdhanService.class).putExtra("name", i.getStringExtra("name"));
+                  ContextCompat.startForegroundService(c, s);
+              }
+          }
+          EOF
+          cat > $D/BootReceiver.java <<'EOF'
+          package com.hassan.deeni;
+
+          import android.content.BroadcastReceiver;
+          import android.content.Context;
+          import android.content.Intent;
+
+          public class BootReceiver extends BroadcastReceiver {
+              @Override
+              public void onReceive(Context c, Intent i) {
+                  try { AdhanScheduler.scheduleAll(c); } catch (Exception ignored) {}
+              }
+          }
+          EOF
+          cat > $D/AdhanService.java <<'EOF'
+          package com.hassan.deeni;
+
+          import android.app.Notification;
+          import android.app.NotificationChannel;
+          import android.app.NotificationManager;
+          import android.app.PendingIntent;
+          import android.app.Service;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.pm.ServiceInfo;
+          import android.content.res.AssetFileDescriptor;
+          import android.media.AudioAttributes;
+          import android.media.MediaPlayer;
+          import android.os.Build;
+          import android.os.IBinder;
+          import android.os.PowerManager;
+
+          public class AdhanService extends Service {
+              MediaPlayer mp;
+              PowerManager.WakeLock wl;
+
+              @Override public IBinder onBind(Intent i) { return null; }
+
+              @Override
+              public int onStartCommand(Intent intent, int flags, int startId) {
+                  if (intent != null && "deeni.adhan.STOP".equals(intent.getAction())) {
+                      stopSelf();
+                      return START_NOT_STICKY;
+                  }
+                  String name = intent == null ? null : intent.getStringExtra("name");
+                  if (name == null) name = "";
+                  NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      NotificationChannel ch = new NotificationChannel("adhan", "الأذان", NotificationManager.IMPORTANCE_HIGH);
+                      ch.setSound(null, null);
+                      nm.createNotificationChannel(ch);
+                  }
+                  PendingIntent stop = PendingIntent.getService(this, 1,
+                      new Intent(this, AdhanService.class).setAction("deeni.adhan.STOP"), PendingIntent.FLAG_IMMUTABLE);
+                  PendingIntent open = PendingIntent.getActivity(this, 2, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
+                  Notification.Builder b = Build.VERSION.SDK_INT >= 26 ? new Notification.Builder(this, "adhan") : new Notification.Builder(this);
+                  b.setSmallIcon(R.mipmap.ic_launcher).setContentTitle("حان الآن موعد أذان " + name.replace("اختبار الأذان", "(اختبار)"))
+                      .setContentText("ديني").setContentIntent(open).setOngoing(true)
+                      .addAction(new Notification.Action.Builder(android.R.drawable.ic_media_pause, "إيقاف", stop).build());
+                  Notification n = b.build();
+                  if (Build.VERSION.SDK_INT >= 29) startForeground(77, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+                  else startForeground(77, n);
+                  if (mp != null) return START_NOT_STICKY;
+                  try {
+                      PowerManager pm = (PowerManager) getSystemService(Context.POWER_SERVICE);
+                      wl = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "deeni:adhan");
+                      wl.acquire(5 * 60 * 1000L);
+                      mp = new MediaPlayer();
+                      mp.setAudioAttributes(new AudioAttributes.Builder()
+                          .setUsage(AudioAttributes.USAGE_ALARM)
+                          .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC).build());
+                      AssetFileDescriptor fd = getResources().openRawResourceFd(R.raw.adhan);
+                      mp.setDataSource(fd.getFileDescriptor(), fd.getStartOffset(), fd.getLength());
+                      fd.close();
+                      mp.setOnCompletionListener(m -> stopSelf());
+                      mp.setOnErrorListener((m, w, e) -> { stopSelf(); return true; });
+                      mp.prepare();
+                      mp.start();
+                  } catch (Exception e) {
+                      stopSelf();
+                  }
+                  return START_NOT_STICKY;
+              }
+
+              @Override
+              public void onDestroy() {
+                  try { if (mp != null) { mp.release(); mp = null; } } catch (Exception ignored) {}
+                  try { if (wl != null && wl.isHeld()) wl.release(); } catch (Exception ignored) {}
+                  super.onDestroy();
+              }
+          }
+          EOF
+          cat > $D/MainActivity.java <<'EOF'
+          package com.hassan.deeni;
+
+          import android.Manifest;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.content.pm.PackageManager;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Handler;
+          import android.os.Looper;
+          import android.os.PowerManager;
+          import android.provider.Settings;
+          import android.webkit.WebView;
+          import com.getcapacitor.BridgeActivity;
+          import org.json.JSONObject;
+          import org.json.JSONTokener;
+
+          public class MainActivity extends BridgeActivity {
+              Handler h = new Handler(Looper.getMainLooper());
+
+              @Override
+              public void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  if (Build.VERSION.SDK_INT >= 33 &&
+                      checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                      requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1);
+                  }
+                  SharedPreferences p = getSharedPreferences("adhan", 0);
+                  if (!p.getBoolean("first_done", false)) {
+                      p.edit().putBoolean("first_done", true).apply();
+                      AdhanScheduler.scheduleAll(this);
+                      AdhanScheduler.scheduleTest(this);
+                      h.postDelayed(() -> {
+                          try {
+                              PowerManager pm = (PowerManager) getSystemService(POWER_SERVICE);
+                              if (!pm.isIgnoringBatteryOptimizations(getPackageName())) {
+                                  startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                                      Uri.parse("package:" + getPackageName())));
+                              }
+                          } catch (Exception ignored) {}
+                      }, 6000);
+                  }
+              }
+
+              @Override
+              public void onResume() {
+                  super.onResume();
+                  h.postDelayed(this::sync, 4000);
+                  h.postDelayed(this::sync, 15000);
+              }
+
+              void sync() {
+                  try {
+                      WebView wv = getBridge().getWebView();
+                      if (wv == null) return;
+                      wv.evaluateJavascript("(function(){try{return JSON.stringify({loc:localStorage.getItem('deen_loc'),pr:localStorage.getItem('deen_adhan_prayers')})}catch(e){return null}})()", v -> {
+                          try {
+                              if (v == null || v.equals("null")) return;
+                              Object o = new JSONTokener(v).nextValue();
+                              if (!(o instanceof String)) return;
+                              JSONObject j = new JSONObject((String) o);
+                              if (j.isNull("loc")) return;
+                              JSONObject loc = new JSONObject(j.getString("loc"));
+                              AdhanScheduler.save(this, loc.getDouble("lat"), loc.getDouble("lng"), j.isNull("pr") ? null : j.getString("pr"));
+                              AdhanScheduler.scheduleAll(this);
+                          } catch (Exception ignored) {}
+                      });
+                  } catch (Exception ignored) {}
+              }
+          }
+          EOF
+      - name: Patch manifest
+        run: |
+          python3 - <<'PY'
+          p = '/tmp/work/android/app/src/main/AndroidManifest.xml'
+          s = open(p, encoding='utf-8').read()
+          perms = ''.join('    <uses-permission android:name="android.permission.%s" />\n' % x for x in [
+              'POST_NOTIFICATIONS', 'FOREGROUND_SERVICE', 'FOREGROUND_SERVICE_MEDIA_PLAYBACK',
+              'RECEIVE_BOOT_COMPLETED', 'WAKE_LOCK', 'REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'])
+          comps = '''
+              <receiver android:name=".AdhanReceiver" android:exported="false" />
+              <receiver android:name=".BootReceiver" android:exported="true">
+                  <intent-filter>
+                      <action android:name="android.intent.action.BOOT_COMPLETED" />
+                      <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+                  </intent-filter>
+              </receiver>
+              <service android:name=".AdhanService" android:exported="false" android:foregroundServiceType="mediaPlayback" />
+          '''
+          assert '</application>' in s and '<application' in s
+          s = s.replace('<application', perms + '    <application', 1)
+          s = s.replace('</application>', comps + '    </application>', 1)
+          open(p, 'w', encoding='utf-8').write(s)
+          PY
+          cat /tmp/work/android/app/src/main/AndroidManifest.xml
+      - name: Build
+        run: |
+          cd /tmp/work
+          npx cap sync android
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+          ls -la app/build/outputs/apk/debug/
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cp /tmp/work/android/app/build/outputs/apk/debug/app-debug.apk /tmp/deeni.apk
+          gh release delete apk-latest --cleanup-tag -y --repo "$GITHUB_REPOSITORY" || true
+          gh release create apk-latest /tmp/deeni.apk --repo "$GITHUB_REPOSITORY" --title "Deeni APK" --notes "Android APK with native adhan alarms."
+          echo "https://github.com/$GITHUB_REPOSITORY/releases/download/apk-latest/deeni.apk"
