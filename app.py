@@ -290,7 +290,7 @@ body.night{filter:brightness(.82) saturate(.88)}
 </div>
 {% block body %}{% endblock %}
 <script>
-var DEEN_VERSION = 7;
+var DEEN_VERSION = 8;
 try { if (localStorage.getItem('deen_night') === '1') document.body.classList.add('night'); } catch(e){}
 function nightToggle(){ var on = document.body.classList.toggle('night'); try { localStorage.setItem('deen_night', on ? '1' : '0'); } catch(e){} }
 function statPing(o){ try { if (navigator.onLine) navigator.sendBeacon('/stats/ping', new Blob([JSON.stringify(o)], {type:'application/json'})); } catch(e){} }
@@ -1669,7 +1669,7 @@ async function notifUI(){
     try {
       var reg = await navigator.serviceWorker.ready;
       var sub = await reg.pushManager.getSubscription();
-      if (sub) { btn.textContent = "✅ التنبيهات مفعّلة"; note.textContent = "هيوصلك إشعار في معاد كل صلاة مختارة."; return; }
+      if (sub) { btn.textContent = "✅ التنبيهات مفعّلة"; note.textContent = "هيوصلك إشعار في معاد كل صلاة مختارة."; adhSyncServer(); return; }
     } catch(e){}
     btn.textContent = "🔔 فعّل تنبيهات الأذان";
   } else if (Notification.permission === "denied") {
@@ -2383,7 +2383,7 @@ MANIFEST = {
 }
 
 SW_JS = """
-const CACHE = 'deen-v7';
+const CACHE = 'deen-v8';
 const AUDIO_CACHE = 'deen-audio-v1';
 const SHELL = ['/', '/quran', '/adhkar', '/adhkar?t=morning', '/adhkar?t=evening', '/duas', '/hadith', '/prayer', '/tasbih', '/qibla', '/dreams', '/names', '/zakat', '/ruqyah', '/manifest.json', '/icon.svg', '/icon-192.png', '/icon-512.png'];
 self.addEventListener('install', e => {
@@ -2744,7 +2744,7 @@ def zakat_page():
 def ruqyah_page():
     return render_template_string(RUQYAH_PAGE, base=BASE, title="الرقية الشرعية", items=RUQYAH, foot=FOOT)
 
-APP_VERSION = 7
+APP_VERSION = 8
 
 # ---------- stats (counts only, no personal data, no IPs) ----------
 STATS_FILE = os.environ.get("DEENI_STATS_FILE", os.path.join(_HERE, "deeni_stats.json"))
