@@ -290,7 +290,7 @@ body.night{filter:brightness(.82) saturate(.88)}
 </div>
 {% block body %}{% endblock %}
 <script>
-var DEEN_VERSION = 8;
+var DEEN_VERSION = 9;
 try { if (localStorage.getItem('deen_night') === '1') document.body.classList.add('night'); } catch(e){}
 function nightToggle(){ var on = document.body.classList.toggle('night'); try { localStorage.setItem('deen_night', on ? '1' : '0'); } catch(e){} }
 function statPing(o){ try { if (navigator.onLine) navigator.sendBeacon('/stats/ping', new Blob([JSON.stringify(o)], {type:'application/json'})); } catch(e){} }
@@ -404,11 +404,12 @@ var AYAH_DAY = [
   document.getElementById('hadithDay').innerHTML = '<div class="t" style="font-size:15px">"' + h[0] + '"</div><div class="r">حديث اليوم · ' + h[1] + '</div>';
 })();
 </script>
-    <div class="aud-note" id="updNote" style="text-align:center">النسخة 7 — التحديثات بتيجي لوحدها، والزرار ده لو حابب تتأكد. الأذان والتلاوات المحمّلة بتفضل محفوظة بعد التحديث.</div>
+    <div class="aud-note" id="updNote" style="text-align:center">النسخة <b id="verNum">9</b> — التحديثات بتيجي لوحدها، والزرار ده لو حابب تتأكد. الأذان والتلاوات المحمّلة بتفضل محفوظة بعد التحديث.</div>
   </div>
   {{ foot }}
 </div>
 <script>
+document.addEventListener("DOMContentLoaded", function(){ var v=document.getElementById("verNum"); if(v && typeof DEEN_VERSION!=="undefined") v.textContent = DEEN_VERSION; });
 async function updateApp(btn){
   btn.disabled = true; btn.textContent = "⏳ جاري البحث عن تحديث...";
   try {
@@ -2383,7 +2384,7 @@ MANIFEST = {
 }
 
 SW_JS = """
-const CACHE = 'deen-v8';
+const CACHE = 'deen-v9';
 const AUDIO_CACHE = 'deen-audio-v1';
 const SHELL = ['/', '/quran', '/adhkar', '/adhkar?t=morning', '/adhkar?t=evening', '/duas', '/hadith', '/prayer', '/tasbih', '/qibla', '/dreams', '/names', '/zakat', '/ruqyah', '/manifest.json', '/icon.svg', '/icon-192.png', '/icon-512.png'];
 self.addEventListener('install', e => {
@@ -2744,7 +2745,7 @@ def zakat_page():
 def ruqyah_page():
     return render_template_string(RUQYAH_PAGE, base=BASE, title="الرقية الشرعية", items=RUQYAH, foot=FOOT)
 
-APP_VERSION = 8
+APP_VERSION = 9
 
 # ---------- stats (counts only, no personal data, no IPs) ----------
 STATS_FILE = os.environ.get("DEENI_STATS_FILE", os.path.join(_HERE, "deeni_stats.json"))
